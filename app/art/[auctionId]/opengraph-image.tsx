@@ -7,6 +7,7 @@ import { getArtistDisplayName, getArtistAvatarUrl } from "@/lib/artist"
 import { formatEth, formatTimeRemaining } from "@/lib/format"
 
 export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 export const alt = "Auction"
 export const size = { width: 1200, height: 630 }
 export const contentType = "image/png"

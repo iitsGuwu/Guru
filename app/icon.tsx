@@ -4,6 +4,10 @@ import { getConfig } from "@/lib/config"
 import { getArtistAvatarUrl } from "@/lib/artist"
 
 export const runtime = "nodejs"
+// Don't prerender at build time — reads config + does an ENS RPC call. If
+// NEXT_PUBLIC_ARTIST_ADDRESS isn't set yet on the deploy host, we want to
+// fail at request time, not block the whole build.
+export const dynamic = "force-dynamic"
 export const size = { width: 32, height: 32 }
 export const contentType = "image/png"
 

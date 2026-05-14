@@ -8,6 +8,8 @@ import {
 } from "@/lib/artist"
 
 export const runtime = "nodejs"
+// See app/icon.tsx for why this is force-dynamic.
+export const dynamic = "force-dynamic"
 
 export const alt = "Auctions"
 export const size = { width: 1200, height: 630 }

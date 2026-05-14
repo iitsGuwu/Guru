@@ -25,7 +25,6 @@
 import { getDefaultConfig, connectorsForWallets } from "@rainbow-me/rainbowkit"
 import {
   injectedWallet,
-  metaMaskWallet,
   coinbaseWallet,
   rainbowWallet,
   walletConnectWallet,
@@ -66,10 +65,19 @@ export function getWagmiConfig() {
     cfg.walletConnectProjectId !== DEFAULT_WALLETCONNECT_PROJECT_ID &&
     cfg.walletConnectProjectId.length > 0
 
-  // Build the explicit wallet list. injected + Coinbase + Safe work without a
-  // WC project ID; WalletConnect mobile and Rainbow are opt-in once a real
-  // project ID is provided.
-  const baseWallets = [injectedWallet, metaMaskWallet, coinbaseWallet, safeWallet]
+  // Build the explicit wallet list. injectedWallet covers any in-browser
+  // wallet that exposes window.ethereum (MetaMask extension, Rabby, Frame,
+  // Brave, OKX, Phantom, etc.) — no SDK socket needed. Coinbase + Safe
+  // bring their own connectors that don't require a WC project ID.
+  //
+  // We intentionally do NOT include RainbowKit's `metaMaskWallet` here:
+  // it pulls in @metamask/sdk, which opens a persistent WebSocket to
+  // MetaMask's mobile-pairing relay. Without a real pairing in progress
+  // that socket drops with "Connection closed" and the SDK retries in a
+  // tight loop, flipping React state and producing visible console errors
+  // on every page. MetaMask Mobile users pair via WalletConnect instead
+  // (opt-in below once NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID is set).
+  const baseWallets = [injectedWallet, coinbaseWallet, safeWallet]
   const wallets = hasRealWcProjectId
     ? [...baseWallets, walletConnectWallet, rainbowWallet]
     : baseWallets

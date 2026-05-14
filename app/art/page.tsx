@@ -1,187 +1,115 @@
-'use client'
+import Link from "next/link"
+import { ArtistHero } from "@/components/ArtistHero"
+import { AuctionCard, bucketFor } from "@/components/AuctionCard"
+import { Footer } from "@/components/Footer"
+import { ConnectButton } from "@/components/ConnectButton"
+import {
+  getAllAuctions,
+  getArtistHouse,
+  type AuctionSummary,
+} from "@/lib/auctions"
+import { getArtistDisplayName } from "@/lib/artist"
+import type { Metadata } from "next"
 
-import { useState, useEffect } from 'react'
-import Image from 'next/image'
-import Link from 'next/link'
-import CustomCursor from '../components/CustomCursor'
+// Force-dynamic so we don't try to scan the chain at build time (cold log
+// scans on public RPCs routinely exceed Next's 60s static-export timeout).
+// `lib/auctions.ts` wraps the RPC reads in `unstable_cache` so subsequent
+// requests within the cache TTL are still cheap.
+export const dynamic = "force-dynamic"
 
-interface NFTToken {
-  token: {
-    tokenId: string
-    name: string | null
-    description: string | null
-    image: string | null
-    collection: {
-      name: string | null
-      id: string | null
-    }
-    lastSale?: {
-      price?: {
-        amount?: { decimal: number }
-        currency?: { symbol: string }
-      }
-    }
-  }
-  market?: {
-    floorAsk?: {
-      price?: {
-        amount?: { decimal: number }
-        currency?: { symbol: string }
-      }
-    }
+export async function generateMetadata(): Promise<Metadata> {
+  const name = await getArtistDisplayName()
+  return {
+    title: `Art`,
+    description: `On-chain creations by ${name} — live and past auctions pulled directly from the blockchain.`,
   }
 }
 
-const CREATOR_ADDRESS = '0x2296E706d9D677d950D338673108b830179F1146'
+const BUCKET_RANK: Record<ReturnType<typeof bucketFor>, number> = {
+  active: 0,
+  ending: 1,
+  listed: 2,
+  settled: 3,
+  cancelled: 4,
+}
 
-export default function ArtPage() {
-  const [tokens, setTokens] = useState<NFTToken[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+function compareAuctions(a: AuctionSummary, b: AuctionSummary): number {
+  const ra = BUCKET_RANK[bucketFor(a)]
+  const rb = BUCKET_RANK[bucketFor(b)]
+  if (ra !== rb) return ra - rb
+  const ba = bucketFor(a)
+  if (ba === "active" || ba === "ending") {
+    return Number(a.endTime) - Number(b.endTime)
+  }
+  return Number(b.auctionId) - Number(a.auctionId)
+}
 
-  useEffect(() => {
-    async function fetchTokens() {
-      try {
-        // Reservoir API — fetch tokens created by this address
-        const res = await fetch(
-          `https://api.reservoir.tools/tokens/v7?creator=${CREATOR_ADDRESS}&sortBy=tokenId&sortDirection=desc&limit=50`,
-          {
-            headers: {
-              'Accept': 'application/json',
-            },
-          }
-        )
-        
-        if (!res.ok) throw new Error(`API returned ${res.status}`)
-        
-        const data = await res.json()
-        setTokens(data.tokens || [])
-      } catch (err) {
-        console.error('Failed to fetch tokens:', err)
-        setError('Failed to load creations from the blockchain.')
-      } finally {
-        setLoading(false)
-      }
-    }
+export default async function ArtPage() {
+  const [auctions, house] = await Promise.all([
+    getAllAuctions(),
+    getArtistHouse(),
+  ])
 
-    fetchTokens()
-  }, [])
+  const sorted = [...auctions].sort(compareAuctions)
+  const activeCount = auctions.filter((a) => {
+    const b = bucketFor(a)
+    return b === "active" || b === "ending"
+  }).length
 
   return (
-    <>
-      <CustomCursor />
-      
-      <div className="scanlines"></div>
-      <div className="crt-flicker"></div>
-
-      <div className="min-h-screen p-6 md:p-12 max-w-[2000px] mx-auto space-y-12 relative z-10">
-        
-        {/* Navigation back */}
-        <Link href="/" className="font-mono text-sm hover-trigger opacity-60 hover:opacity-100 transition-opacity inline-block">
+    <div className="relative z-10 mx-auto max-w-[2000px] px-6 py-8 md:py-12 space-y-12">
+      <div className="flex items-center justify-between gap-4">
+        <Link
+          href="/"
+          className="font-mono text-sm hover-trigger opacity-60 hover:opacity-100 transition-opacity inline-block"
+        >
           ← B A C K
         </Link>
-
-        {/* Page Header */}
-        <div className="flex flex-col sm:flex-row items-start gap-8">
-          <div className="relative w-24 h-24 shrink-0 border border-white/30 p-1">
-            <Image
-              src="/assets/images/guru-pfp.jpg"
-              alt="iitsGuru"
-              fill
-              className="object-cover grayscale"
-            />
-          </div>
-          
-          <div className="space-y-3">
-            <h1 className="text-4xl md:text-6xl font-title glitch terminal-text" data-text="iitsGuru">
-              iitsGuru
-            </h1>
-            <p className="font-mono text-xs text-white/40 tracking-wider">
-              {CREATOR_ADDRESS.slice(0, 6)}...{CREATOR_ADDRESS.slice(-4)} · iitsguru.eth
-            </p>
-            <p className="max-w-xl text-sm font-mono opacity-50 leading-relaxed">
-              On-chain creations pulled live from the blockchain.
-            </p>
-            {!loading && (
-              <p className="font-mono text-xs opacity-40">
-                <strong className="text-white opacity-100">{tokens.length}</strong> creations indexed
-              </p>
-            )}
-          </div>
-        </div>
-
-        {/* Loading State */}
-        {loading && (
-          <div className="flex items-center justify-center py-20">
-            <div className="font-mono text-[#00ff00] text-sm terminal-text animate-pulse">
-              SCANNING_BLOCKCHAIN_FOR_ARTIFACTS...
-            </div>
-          </div>
-        )}
-
-        {/* Error State */}
-        {error && !loading && (
-          <div className="border border-white/20 p-8 text-center space-y-2">
-            <p className="font-mono text-sm opacity-70">{error}</p>
-            <p className="font-mono text-xs opacity-40">The indexer may be temporarily unavailable.</p>
-          </div>
-        )}
-
-        {/* Masonry Grid */}
-        {!loading && !error && tokens.length > 0 && (
-          <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-6 [&>*]:mb-6 [&>*]:break-inside-avoid">
-            {tokens.map((item) => {
-              const t = item.token
-              const imageUrl = t.image || '/assets/images/art.png'
-              const price = item.market?.floorAsk?.price || t.lastSale?.price
-              
-              return (
-                <div 
-                  key={`${t.collection?.id}-${t.tokenId}`} 
-                  className="border border-white/15 hover:border-white/50 p-4 bg-black/40 group hover-trigger transition-all duration-300"
-                >
-                  <div className="relative aspect-square w-full mb-4 border border-white/10 overflow-hidden bg-white/5">
-                    <Image
-                      src={imageUrl}
-                      alt={t.name || `Token #${t.tokenId}`}
-                      fill
-                      className="object-cover grayscale group-hover:grayscale-0 group-hover:scale-105 transition-all duration-500"
-                      unoptimized
-                    />
-                  </div>
-                  <div className="flex justify-between items-end font-mono text-sm">
-                    <div className="min-w-0 flex-1">
-                      <h3 className="font-bold text-base tracking-wider truncate">
-                        {t.name || `#${t.tokenId}`}
-                      </h3>
-                      <p className="opacity-40 text-xs mt-1 truncate">
-                        {t.collection?.name || 'Unknown Collection'}
-                      </p>
-                    </div>
-                    {price && (
-                      <div className="text-right flex-shrink-0 ml-3">
-                        <p className="font-bold text-xs">
-                          {price.amount?.decimal} {price.currency?.symbol || 'ETH'}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
-
-        {/* Empty State */}
-        {!loading && !error && tokens.length === 0 && (
-          <div className="border border-white/20 p-12 text-center">
-            <p className="font-mono text-sm opacity-50">
-              No on-chain creations found for this address.
-            </p>
-          </div>
-        )}
-
+        <ConnectButton />
       </div>
-    </>
+
+      <ArtistHero
+        totalAuctions={auctions.length}
+        activeAuctions={activeCount}
+      />
+
+      {!house ? (
+        <NoHouseState />
+      ) : sorted.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-6 [&>*]:mb-6 [&>*]:break-inside-avoid">
+          {sorted.map((a) => (
+            <AuctionCard key={a.auctionId} auction={a} />
+          ))}
+        </div>
+      )}
+
+      <Footer />
+    </div>
+  )
+}
+
+function EmptyState() {
+  return (
+    <div className="border border-white/15 p-12 text-center">
+      <p className="font-mono text-sm text-fg-muted">
+        No auctions yet — they&rsquo;ll appear here once they&rsquo;re created on-chain.
+      </p>
+    </div>
+  )
+}
+
+function NoHouseState() {
+  return (
+    <div className="border border-white/15 p-12 text-center space-y-2">
+      <p className="font-gothic text-sm tracking-[0.2em] uppercase">
+        Auction house not deployed
+      </p>
+      <p className="font-mono text-sm text-fg-muted max-w-md mx-auto">
+        This wallet hasn&rsquo;t deployed a Sovereign auction house yet. Once
+        deployed, every auction created shows up here automatically.
+      </p>
+    </div>
   )
 }

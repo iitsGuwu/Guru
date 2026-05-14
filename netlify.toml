@@ -1,9 +1,17 @@
+# Netlify deploy configuration.
+# Required env vars are documented in `.env.example`.
+
 [build]
   command = "npm run build"
   publish = ".next"
 
+[build.environment]
+  NODE_VERSION = "20"
+
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 
-[build.environment]
-  NODE_VERSION = "18"
+[template.environment]
+  NEXT_PUBLIC_ARTIST_ADDRESS = "Your wallet address (0x...). The /art page surfaces every auction this wallet has on the SovereignAuctionHouse."
+  NEXT_PUBLIC_RPC_URL = "Optional. Paste your own Alchemy/Infura URL to make pages load noticeably faster. Leave blank to use the bundled public RPC defaults."
+  NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID = "Optional. Set to enable WalletConnect mobile QR connections. Get a free project ID at https://cloud.reown.com."

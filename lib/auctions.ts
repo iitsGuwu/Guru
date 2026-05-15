@@ -22,6 +22,27 @@ import {
 } from "./abi"
 import { getConfig, ZERO_ADDRESS } from "./config"
 
+// Hard deadline for any on-chain scan inside this module. Netlify's free
+// tier kills functions at ~10s and the Pro tier at ~26s — overshooting that
+// truncates the RSC stream mid-flight and the browser sees "Connection
+// closed" loops. We throw before that happens so the cache stays empty
+// (not poisoned with partial data) and `app/art/error.tsx` renders a clean
+// retry state instead.
+const SCAN_DEADLINE_MS = 18_000
+
+function withDeadline<T>(label: string, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`[auctions] ${label} exceeded ${SCAN_DEADLINE_MS}ms`)),
+      SCAN_DEADLINE_MS,
+    )
+  })
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer !== null) clearTimeout(timer)
+  })
+}
+
 const auctionCreatedEvent = parseAbiItem(
   "event AuctionCreated(uint256 indexed auctionId, uint256 indexed tokenId, address indexed tokenContract, uint256 duration, uint256 reservePrice, address tokenOwner)",
 )
@@ -129,7 +150,7 @@ const _getAllAuctionsCached = unstable_cache(
   async (artistAddress: Address): Promise<AuctionSummary[]> => {
     const house = await _getArtistHouseCached(artistAddress)
     if (!house) return []
-    return fetchAllAuctionsForHouse(house)
+    return withDeadline("getAllAuctions", fetchAllAuctionsForHouse(house))
   },
   ["all-auctions-v2"],
   // 10-min TTL — paired with the netlify/functions/warm-art-cache.mts
@@ -409,6 +430,18 @@ export async function getAuctionById(
  */
 const _getBidHistoryCached = unstable_cache(
   async (artistAddress: Address, auctionId: string): Promise<BidEntry[]> => {
+    return withDeadline(`getBidHistory(${auctionId})`, fetchBidHistory(artistAddress, auctionId))
+  },
+  ["bid-history-v2"],
+  // 10-min TTL — refreshed on-demand via `revalidateTag("all-auctions")`
+  // after bid/settle confirms in BidForm.
+  { revalidate: 600, tags: ["all-auctions"] },
+)
+
+async function fetchBidHistory(
+  artistAddress: Address,
+  auctionId: string,
+): Promise<BidEntry[]> {
     const house = await _getArtistHouseCached(artistAddress)
     if (!house) return []
     const { factoryDeployBlock } = getConfig()
@@ -454,12 +487,7 @@ const _getBidHistoryCached = unstable_cache(
       }))
     entries.sort((a, b) => b.blockTime - a.blockTime)
     return entries
-  },
-  ["bid-history-v2"],
-  // 10-min TTL — refreshed on-demand via `revalidateTag("all-auctions")`
-  // after bid/settle confirms in BidForm.
-  { revalidate: 600, tags: ["all-auctions"] },
-)
+}
 
 export async function getBidHistory(auctionId: string): Promise<BidEntry[]> {
   const { artistAddress } = getConfig()

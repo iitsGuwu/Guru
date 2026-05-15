@@ -132,7 +132,11 @@ const _getAllAuctionsCached = unstable_cache(
     return fetchAllAuctionsForHouse(house)
   },
   ["all-auctions-v2"],
-  { revalidate: 60, tags: ["all-auctions"] },
+  // 10-min TTL — paired with the netlify/functions/warm-art-cache.mts
+  // scheduled function that hits /art every 5 min to keep this populated,
+  // and `revalidateTag("all-auctions")` from `app/actions.ts` for instant
+  // refresh after bid/settle txs.
+  { revalidate: 600, tags: ["all-auctions"] },
 )
 
 export async function getAllAuctions(): Promise<AuctionSummary[]> {
@@ -452,7 +456,9 @@ const _getBidHistoryCached = unstable_cache(
     return entries
   },
   ["bid-history-v2"],
-  { revalidate: 30, tags: ["all-auctions"] },
+  // 10-min TTL — refreshed on-demand via `revalidateTag("all-auctions")`
+  // after bid/settle confirms in BidForm.
+  { revalidate: 600, tags: ["all-auctions"] },
 )
 
 export async function getBidHistory(auctionId: string): Promise<BidEntry[]> {

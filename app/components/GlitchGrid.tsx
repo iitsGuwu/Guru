@@ -22,8 +22,6 @@ export default function GlitchGrid() {
     let rows = 0
     let frame: number | null = null
 
-    let glitchLines: { y: number; opacity: number; width: number; speed: number }[] = []
-
     const resize = () => {
       w = canvas.width = window.innerWidth
       h = canvas.height = window.innerHeight
@@ -54,8 +52,8 @@ export default function GlitchGrid() {
       ctx.fillStyle = '#050505'
       ctx.fillRect(0, 0, w, h)
 
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
-      ctx.lineWidth = 0.5
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)'
+      ctx.lineWidth = 0.6
 
       for (let row = 0; row < rows; row++) {
         ctx.beginPath()
@@ -97,23 +95,6 @@ export default function GlitchGrid() {
           }
         }
       }
-
-      if (Math.random() < 0.03) {
-        glitchLines.push({
-          y: Math.random() * h,
-          opacity: 0.15 + Math.random() * 0.15,
-          width: 1 + Math.random() * 3,
-          speed: 0.02 + Math.random() * 0.04,
-        })
-      }
-
-      glitchLines = glitchLines.filter((line) => {
-        line.opacity -= line.speed
-        if (line.opacity <= 0) return false
-        ctx.fillStyle = `rgba(255, 255, 255, ${line.opacity})`
-        ctx.fillRect(0, line.y, w, line.width)
-        return true
-      })
 
       frame = requestAnimationFrame(render)
     }

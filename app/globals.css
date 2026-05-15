@@ -104,21 +104,6 @@ html {
   pointer-events: none;
 }
 
-.crt-flicker {
-  animation: flicker 0.15s infinite;
-  pointer-events: none;
-  z-index: 51;
-  position: fixed;
-  inset: 0;
-  background: rgba(255, 255, 255, 0.01);
-}
-
-@keyframes flicker {
-  0% { opacity: 0.97; }
-  50% { opacity: 0.90; }
-  100% { opacity: 0.97; }
-}
-
 .terminal-text {
   text-shadow: 0 0 5px rgba(255, 255, 255, 0.8);
 }

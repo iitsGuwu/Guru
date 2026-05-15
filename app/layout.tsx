@@ -63,10 +63,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-screen antialiased" suppressHydrationWarning>
         <Providers>
           {/* Shared CRT chrome — mounted once at the root so it doesn't
-              flicker / reinit on client-side route transitions. */}
+              reinit on client-side route transitions. */}
           <CustomCursor />
           <div className="scanlines" aria-hidden />
-          <div className="crt-flicker" aria-hidden />
 
           {children}
         </Providers>

@@ -7,6 +7,7 @@ import { SettledSummary } from "@/components/SettledSummary"
 import { TokenMedia } from "@/components/TokenMedia"
 import { Provenance } from "@/components/Provenance"
 import { ConnectButton } from "@/components/ConnectButton"
+import { PendingRefundsBanner } from "@/components/PendingRefundsBanner"
 import { getArtistHouse, getAuctionById, getBidHistory } from "@/lib/auctions"
 import { getTokenMetadata } from "@/lib/metadata"
 import { getTokenOwner, getTokenProvenance } from "@/lib/token"
@@ -101,6 +102,10 @@ export default async function AuctionPage({ params }: { params: Params }) {
           ← B A C K
         </Link>
         <ConnectButton />
+      </div>
+
+      <div className="px-6 pt-4">
+        <PendingRefundsBanner houseAddress={house} />
       </div>
 
       {/* Two-column desktop layout: sticky artwork on the left, scrolling

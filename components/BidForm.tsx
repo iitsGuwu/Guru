@@ -1,19 +1,33 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { type Address, formatEther, parseEther } from "viem"
 import {
   useAccount,
   useBalance,
   useReadContract,
+  useSimulateContract,
   useWaitForTransactionReceipt,
+  useWatchContractEvent,
   useWriteContract,
 } from "wagmi"
 import { ConnectButton as RKConnectButton } from "@rainbow-me/rainbowkit"
 import { sovereignAuctionHouseAbi } from "@/lib/abi"
 import { ZERO_ADDRESS } from "@/lib/config"
 import { displayFor, formatEth } from "@/lib/format"
+import { refreshAuctions } from "@/app/actions"
+
+// 3 mETH gas reserve — covers a Place Bid tx at typical mainnet fees. Avoids
+// the "you have enough for the bid but not enough for gas" failure that
+// happens when checking the raw balance.
+const GAS_RESERVE_WEI = parseEther("0.003")
+
+// Within this many seconds of the auction's end, poll on-chain state every
+// 3s instead of the default 12s so sniping bids surface immediately. The
+// contract emits AuctionEndTimeUpdated on extension; we already listen for
+// that, but a faster poll catches state changes from other paths too.
+const SNIPING_WINDOW_SEC = 300
 
 type Props = {
   houseAddress: Address
@@ -59,7 +73,19 @@ export function BidForm({ houseAddress, auctionId, initial, ensMap }: Props) {
       ] as readonly [
         bigint, Address, bigint, bigint, bigint, Address, bigint, Address, bigint,
       ],
-      refetchInterval: 12_000,
+      // Dynamic interval: snap to 3s when we're close to the auction's end
+      // so sniping bids and time extensions surface before the next render.
+      refetchInterval: (query) => {
+        const data = query.state.data as
+          | readonly [bigint, Address, bigint, bigint, bigint, Address, bigint, Address, bigint]
+          | undefined
+        if (!data) return 12_000
+        const endTime = Number(data[6])
+        if (endTime <= 0) return 12_000
+        const remaining = endTime - Math.floor(Date.now() / 1000)
+        if (remaining > 0 && remaining < SNIPING_WINDOW_SEC) return 3_000
+        return 12_000
+      },
     },
   })
 
@@ -89,6 +115,57 @@ export function BidForm({ houseAddress, auctionId, initial, ensMap }: Props) {
   const nowSec = useNowSec()
   const ended = !awaitingFirstBid && endTime > 0n && BigInt(nowSec) >= endTime
 
+  const refetchAll = useCallback(() => {
+    auctionRead.refetch()
+    minBidRead.refetch()
+  }, [auctionRead, minBidRead])
+
+  // Per-auction event watchers — keep on-chain state in sync without waiting
+  // for the polling interval. Filtered by auctionId so the watcher only fires
+  // for this auction's events.
+  useWatchContractEvent({
+    address: houseAddress,
+    abi: sovereignAuctionHouseAbi,
+    eventName: "AuctionBid",
+    args: { auctionId: BigInt(auctionId) },
+    onLogs: () => {
+      refetchAll()
+      refreshAuctions().then(() => router.refresh())
+    },
+    pollingInterval: 10_000,
+  })
+  useWatchContractEvent({
+    address: houseAddress,
+    abi: sovereignAuctionHouseAbi,
+    eventName: "AuctionEndTimeUpdated",
+    args: { auctionId: BigInt(auctionId) },
+    onLogs: refetchAll,
+    // Sniping-critical event — poll faster than the others.
+    pollingInterval: 5_000,
+  })
+  useWatchContractEvent({
+    address: houseAddress,
+    abi: sovereignAuctionHouseAbi,
+    eventName: "AuctionEnded",
+    args: { auctionId: BigInt(auctionId) },
+    onLogs: () => {
+      refetchAll()
+      refreshAuctions().then(() => router.refresh())
+    },
+    pollingInterval: 10_000,
+  })
+  useWatchContractEvent({
+    address: houseAddress,
+    abi: sovereignAuctionHouseAbi,
+    eventName: "AuctionCanceled",
+    args: { auctionId: BigInt(auctionId) },
+    onLogs: () => {
+      refetchAll()
+      refreshAuctions().then(() => router.refresh())
+    },
+    pollingInterval: 10_000,
+  })
+
   const { writeContract, data: txHash, isPending, error: writeError } =
     useWriteContract()
   const { isLoading: confirming, isSuccess: confirmed } =
@@ -96,9 +173,11 @@ export function BidForm({ houseAddress, auctionId, initial, ensMap }: Props) {
 
   useEffect(() => {
     if (confirmed) {
-      auctionRead.refetch()
-      minBidRead.refetch()
-      router.refresh()
+      refetchAll()
+      // Invalidate the server-cached auction list + bid history before
+      // forcing a re-render, otherwise router.refresh() would just re-fetch
+      // the (still-fresh) 10-min cache and miss the new bid.
+      refreshAuctions().then(() => router.refresh())
     }
   }, [confirmed]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -239,12 +318,9 @@ function PriceRow({
 }
 
 function ErrorLine({ error }: { error: Error }) {
-  const msg = (error.message ?? "").split("\n")[0]
+  const msg = extractErrorMessage(error)
   return (
-    <p
-      className="text-[11px] font-mono text-status-sold"
-      role="alert"
-    >
+    <p className="text-[11px] font-mono text-status-sold" role="alert">
       {msg || "Transaction failed."}
     </p>
   )
@@ -292,17 +368,40 @@ function BidInput({
   })
   const balanceWei = balanceQuery.data?.value ?? 0n
   const balanceLoaded = balanceQuery.isSuccess
-  const insufficient = balanceLoaded && parsed > balanceWei
+  // Reserve a gas allowance so the user doesn't have to babysit a tx that
+  // would have just-enough ETH for the bid but fail on gas.
+  const usableBalance =
+    balanceWei > GAS_RESERVE_WEI ? balanceWei - GAS_RESERVE_WEI : 0n
+  const insufficient = balanceLoaded && parsed > usableBalance
+
+  // Pre-flight the bid before the user pays gas. Catches reverts from stale
+  // state (auction extended, ended, cancelled, someone else bid above us, etc.)
+  // before the user submits.
+  const bidSim = useSimulateContract({
+    address: houseAddress,
+    abi: sovereignAuctionHouseAbi,
+    functionName: "createBid",
+    args: [BigInt(auctionId)],
+    value: parsed,
+    query: {
+      enabled: Boolean(connected) && !tooLow && !insufficient,
+    },
+  })
+  const simErrorMsg = extractErrorMessage(bidSim.error)
+
+  const presets = useMemo(
+    () => [
+      { label: "Min", wei: minBidWei },
+      { label: "+10%", wei: (minBidWei * 110n) / 100n },
+      { label: "+25%", wei: (minBidWei * 125n) / 100n },
+      { label: "+50%", wei: (minBidWei * 150n) / 100n },
+    ],
+    [minBidWei],
+  )
 
   function submit() {
-    if (tooLow || insufficient) return
-    writeContract({
-      address: houseAddress,
-      abi: sovereignAuctionHouseAbi,
-      functionName: "createBid",
-      args: [BigInt(auctionId)],
-      value: parsed,
-    })
+    if (!bidSim.data) return
+    writeContract(bidSim.data.request)
   }
 
   if (!isConnected || !connected) {
@@ -324,7 +423,20 @@ function BidInput({
   }
 
   return (
-    <div className="pt-2 space-y-2">
+    <div className="pt-2 space-y-3">
+      <div className="flex gap-1.5">
+        {presets.map((p) => (
+          <button
+            key={p.label}
+            type="button"
+            onClick={() => setValue(stripTrailingZeros(formatEther(p.wei)))}
+            className="flex-1 px-2 py-1.5 font-mono text-[10px] uppercase tracking-wider border border-gray-200 hover:border-gray-400 transition-colors"
+            aria-label={`Set bid to ${p.label}`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
       <label className="flex items-center gap-2 rounded-md border border-gray-200 bg-bg px-3 py-2 focus-within:border-gray-400 transition-colors">
         <input
           type="number"
@@ -338,10 +450,29 @@ function BidInput({
         />
         <span className="font-mono text-xs text-gray-500">ETH</span>
       </label>
+      {balanceLoaded ? (
+        <p className="text-[10px] font-mono text-gray-500 leading-relaxed">
+          Bid: <span className="tabular-nums">{formatEth(parsed.toString())}</span> ETH · Gas reserve:{" "}
+          <span className="tabular-nums">{formatEth(GAS_RESERVE_WEI.toString())}</span> ETH · Available:{" "}
+          <span className="tabular-nums">{formatEth(usableBalance.toString())}</span> ETH
+        </p>
+      ) : null}
+      {simErrorMsg && !tooLow && !insufficient ? (
+        <p className="text-[11px] font-mono text-status-sold" role="alert">
+          {simErrorMsg}
+        </p>
+      ) : null}
       <button
         type="button"
         onClick={submit}
-        disabled={tooLow || insufficient || isPending || confirming}
+        disabled={
+          tooLow ||
+          insufficient ||
+          isPending ||
+          confirming ||
+          !bidSim.data ||
+          Boolean(simErrorMsg)
+        }
         className="block w-full text-center text-sm font-medium py-3 bg-fg text-bg disabled:cursor-not-allowed disabled:opacity-60 hover:opacity-80 transition-opacity"
       >
         {confirming
@@ -351,8 +482,10 @@ function BidInput({
             : tooLow
               ? `Min bid ${formatEth(minBidWei.toString())} ETH`
               : insufficient
-                ? `Insufficient balance · ${formatEth(balanceWei.toString())} ETH available`
-                : "Place bid"}
+                ? `Insufficient · ${formatEth(usableBalance.toString())} ETH usable`
+                : bidSim.isFetching
+                  ? "Checking…"
+                  : "Place bid"}
       </button>
     </div>
   )
@@ -373,6 +506,15 @@ function SettleButton({
   confirming: boolean
   writeContract: WriteContractFn
 }) {
+  const settleSim = useSimulateContract({
+    address: houseAddress,
+    abi: sovereignAuctionHouseAbi,
+    functionName: "endAuction",
+    args: [BigInt(auctionId)],
+    query: { enabled: isConnected },
+  })
+  const simErrorMsg = extractErrorMessage(settleSim.error)
+
   if (!isConnected) {
     return (
       <div className="pt-2">
@@ -391,25 +533,30 @@ function SettleButton({
     )
   }
   return (
-    <button
-      type="button"
-      onClick={() =>
-        writeContract({
-          address: houseAddress,
-          abi: sovereignAuctionHouseAbi,
-          functionName: "endAuction",
-          args: [BigInt(auctionId)],
-        })
-      }
-      disabled={isPending || confirming}
-      className="mt-2 block w-full text-center text-sm font-medium py-3 bg-fg text-bg disabled:cursor-not-allowed disabled:opacity-60 hover:opacity-80 transition-opacity"
-    >
-      {confirming
-        ? "Waiting for confirmation…"
-        : isPending
-          ? "Confirm in wallet…"
-          : "Settle auction"}
-    </button>
+    <div className="space-y-2">
+      <button
+        type="button"
+        onClick={() => {
+          if (!settleSim.data) return
+          writeContract(settleSim.data.request)
+        }}
+        disabled={isPending || confirming || !settleSim.data || Boolean(simErrorMsg)}
+        className="mt-2 block w-full text-center text-sm font-medium py-3 bg-fg text-bg disabled:cursor-not-allowed disabled:opacity-60 hover:opacity-80 transition-opacity"
+      >
+        {confirming
+          ? "Waiting for confirmation…"
+          : isPending
+            ? "Confirm in wallet…"
+            : settleSim.isFetching
+              ? "Checking…"
+              : "Settle auction"}
+      </button>
+      {simErrorMsg ? (
+        <p className="text-[11px] font-mono text-status-sold" role="alert">
+          {simErrorMsg}
+        </p>
+      ) : null}
+    </div>
   )
 }
 
@@ -433,4 +580,24 @@ function useNowSec(): number {
     return () => clearInterval(id)
   }, [])
   return now
+}
+
+/**
+ * Pull a compact display string out of a viem-flavored error. viem populates
+ * `shortMessage` on its error classes and falls back to the first line of
+ * `message` for upstream Error instances.
+ */
+function extractErrorMessage(error: unknown): string | null {
+  if (!error) return null
+  const e = error as Error & { shortMessage?: string }
+  if (e.shortMessage) return e.shortMessage
+  if (typeof e.message === "string") return e.message.split("\n")[0]
+  return String(error)
+}
+
+function stripTrailingZeros(eth: string): string {
+  if (!eth.includes(".")) return eth
+  const [whole, frac] = eth.split(".")
+  const trimmed = frac.replace(/0+$/, "")
+  return trimmed ? `${whole}.${trimmed}` : whole
 }

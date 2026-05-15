@@ -2,8 +2,10 @@ import { Suspense } from "react"
 import Link from "next/link"
 import { ArtistHero } from "@/components/ArtistHero"
 import { AuctionCard, bucketFor } from "@/components/AuctionCard"
+import { AuctionRealtimeWatcher } from "@/components/AuctionRealtimeWatcher"
 import { Footer } from "@/components/Footer"
 import { ConnectButton } from "@/components/ConnectButton"
+import { PendingRefundsBanner } from "@/components/PendingRefundsBanner"
 import {
   getAllAuctions,
   getArtistHouse,
@@ -95,10 +97,20 @@ async function AuctionGrid() {
     return b === "active" || b === "ending"
   }).length
 
-  if (sorted.length === 0) return <EmptyState />
+  if (sorted.length === 0) {
+    return (
+      <div className="space-y-4">
+        <PendingRefundsBanner houseAddress={house} />
+        <AuctionRealtimeWatcher houseAddress={house} />
+        <EmptyState />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
+      <PendingRefundsBanner houseAddress={house} />
+      <AuctionRealtimeWatcher houseAddress={house} />
       <p className="font-mono text-xs text-fg-muted">
         {auctions.length} {auctions.length === 1 ? "auction" : "auctions"}
         {activeCount > 0 ? ` · ${activeCount} live` : ""}

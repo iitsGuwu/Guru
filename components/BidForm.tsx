@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { useRouter } from "next/navigation"
 import { type Address, formatEther, parseEther } from "viem"
 import {
   useAccount,
@@ -37,6 +38,7 @@ type Props = {
  */
 export function BidForm({ houseAddress, auctionId, initial, ensMap }: Props) {
   const { address: connected, isConnected } = useAccount()
+  const router = useRouter()
 
   const auctionRead = useReadContract({
     address: houseAddress,
@@ -96,6 +98,7 @@ export function BidForm({ houseAddress, auctionId, initial, ensMap }: Props) {
     if (confirmed) {
       auctionRead.refetch()
       minBidRead.refetch()
+      router.refresh()
     }
   }, [confirmed]) // eslint-disable-line react-hooks/exhaustive-deps
 

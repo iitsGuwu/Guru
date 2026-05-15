@@ -207,27 +207,11 @@ async function fetchAllAuctionsForHouse(
   // for past auctions where the storage slot has been deleted. We also
   // need block.timestamp for sort ordering — fetch via getBlock per
   // unique block (small N for typical artist).
-  const uniqueBlocks = Array.from(
-    new Set(created.map((l) => l.blockNumber).filter((b): b is bigint => b !== null)),
-  )
-  const blockTimes = new Map<bigint, number>()
-  await Promise.all(
-    uniqueBlocks.map(async (bn) => {
-      try {
-        const block = await client.getBlock({ blockNumber: bn })
-        blockTimes.set(bn, Number(block.timestamp))
-      } catch {
-        blockTimes.set(bn, 0)
-      }
-    }),
-  )
-
-  const createdByAuctionId = new Map<string, (typeof created)[number] & { _ts: number }>()
+  const createdByAuctionId = new Map<string, (typeof created)[number]>()
   for (const log of created) {
     const id = log.args.auctionId
     if (id === undefined) continue
-    const ts = log.blockNumber !== null ? blockTimes.get(log.blockNumber) ?? 0 : 0
-    createdByAuctionId.set(id.toString(), Object.assign(log, { _ts: ts }))
+    createdByAuctionId.set(id.toString(), log)
   }
 
   for (let i = 0; i < ids.length; i += BATCH) {
@@ -330,12 +314,8 @@ async function fetchAllAuctionsForHouse(
     })
   }
 
-  // Sort newest auctions first by created-block timestamp.
-  auctions.sort((a, b) => {
-    const aTs = createdByAuctionId.get(a.auctionId)?._ts ?? 0
-    const bTs = createdByAuctionId.get(b.auctionId)?._ts ?? 0
-    return bTs - aTs
-  })
+  // Sort newest auctions first — auctionIds are assigned sequentially by the contract.
+  auctions.sort((a, b) => Number(BigInt(b.auctionId) - BigInt(a.auctionId)))
   return auctions
 }
 

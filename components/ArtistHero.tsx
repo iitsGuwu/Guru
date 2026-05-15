@@ -19,12 +19,7 @@ import { formatAddress } from "@/lib/format"
 import { getEnsName } from "@/lib/ens"
 import { AddressZorb } from "@/components/AddressZorb"
 
-type Props = {
-  totalAuctions: number
-  activeAuctions: number
-}
-
-export async function ArtistHero({ totalAuctions, activeAuctions }: Props) {
+export async function ArtistHero() {
   const cfg = getConfig()
   const [displayName, avatarUrl, bio, links, ens, house] = await Promise.all([
     getArtistDisplayName(),
@@ -64,19 +59,6 @@ export async function ArtistHero({ totalAuctions, activeAuctions }: Props) {
         {bio ? (
           <p className="max-w-2xl text-sm text-fg-muted">{bio}</p>
         ) : null}
-
-        <div className="flex items-center gap-4 text-sm text-gray-500 pt-1">
-          <span>
-            <strong className="text-fg">{totalAuctions}</strong>{" "}
-            {totalAuctions === 1 ? "auction" : "auctions"}
-          </span>
-          {activeAuctions > 0 && (
-            <span>
-              <strong className="text-fg">{activeAuctions}</strong>{" "}
-              live
-            </span>
-          )}
-        </div>
 
         <div className="flex items-center flex-wrap gap-2 pt-2">
           <a

@@ -94,8 +94,8 @@ async function fetchFromTokenUri(
 
 /**
  * Resolve any `tokenURI` value into a JSON object. Handles `data:` URLs
- * inline (parsing JSON, base64, or percent-encoded payloads); races IPFS
- * gateways; falls back to a direct `fetch` for HTTPS URLs.
+ * inline; races all IPFS gateways in parallel (first to respond wins);
+ * falls back to a direct fetch for HTTPS URLs.
  */
 async function loadMetadataJson(
   uri: string,
@@ -103,25 +103,38 @@ async function loadMetadataJson(
   if (uri.startsWith("data:")) {
     return parseDataUrlJson(uri)
   }
-  const candidates = expandIpfsUri(uri)
-  for (const url of candidates) {
+  if (uri.startsWith("ipfs://")) {
+    const path = uri.slice("ipfs://".length).replace(/^ipfs\//, "")
+    const ac = new AbortController()
     try {
-      const res = await fetch(url, {
-        headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(8000),
-      })
-      if (!res.ok) continue
-      const text = await res.text()
-      try {
-        return JSON.parse(text) as Record<string, unknown>
-      } catch {
-        continue
-      }
+      return await Promise.any(
+        IPFS_GATEWAYS.map((g) =>
+          fetchJson(g + path, AbortSignal.any([ac.signal, AbortSignal.timeout(8_000)])),
+        ),
+      )
     } catch {
-      continue
+      return null
+    } finally {
+      ac.abort()
     }
   }
-  return null
+  try {
+    return await fetchJson(uri, AbortSignal.timeout(8_000))
+  } catch {
+    return null
+  }
+}
+
+async function fetchJson(
+  url: string,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(url, { headers: { Accept: "application/json" }, signal })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const text = await res.text()
+  const parsed = JSON.parse(text) as unknown
+  if (typeof parsed !== "object" || parsed === null) throw new Error("not an object")
+  return parsed as Record<string, unknown>
 }
 
 /**
@@ -177,18 +190,6 @@ function parseDataUrlJson(url: string): Record<string, unknown> | null {
   } catch {
     return null
   }
-}
-
-/**
- * Expand an `ipfs://` URI into a list of gateway URLs to race. Pass-through
- * for everything else.
- */
-function expandIpfsUri(uri: string): string[] {
-  if (uri.startsWith("ipfs://")) {
-    const path = uri.slice("ipfs://".length).replace(/^ipfs\//, "")
-    return IPFS_GATEWAYS.map((g) => g + path)
-  }
-  return [uri]
 }
 
 /**

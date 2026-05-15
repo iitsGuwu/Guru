@@ -1,3 +1,4 @@
+import { Suspense } from "react"
 import Link from "next/link"
 import { ArtistHero } from "@/components/ArtistHero"
 import { AuctionCard, bucketFor } from "@/components/AuctionCard"
@@ -8,6 +9,7 @@ import {
   getArtistHouse,
   type AuctionSummary,
 } from "@/lib/auctions"
+import { getTokenMetadata } from "@/lib/metadata"
 import { getArtistDisplayName } from "@/lib/artist"
 import type { Metadata } from "next"
 
@@ -45,17 +47,6 @@ function compareAuctions(a: AuctionSummary, b: AuctionSummary): number {
 }
 
 export default async function ArtPage() {
-  const [auctions, house] = await Promise.all([
-    getAllAuctions(),
-    getArtistHouse(),
-  ])
-
-  const sorted = [...auctions].sort(compareAuctions)
-  const activeCount = auctions.filter((a) => {
-    const b = bucketFor(a)
-    return b === "active" || b === "ending"
-  }).length
-
   return (
     <div className="relative z-10 mx-auto max-w-[2000px] px-6 py-8 md:py-12 space-y-12">
       <div className="flex items-center justify-between gap-4">
@@ -68,24 +59,78 @@ export default async function ArtPage() {
         <ConnectButton />
       </div>
 
-      <ArtistHero
-        totalAuctions={auctions.length}
-        activeAuctions={activeCount}
-      />
+      {/* Hero streams in immediately — only needs ENS + house reads (cached 6h / 1h). */}
+      <Suspense fallback={<HeroFallback />}>
+        <ArtistHero />
+      </Suspense>
 
-      {!house ? (
-        <NoHouseState />
-      ) : sorted.length === 0 ? (
-        <EmptyState />
-      ) : (
-        <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-6 [&>*]:mb-6 [&>*]:break-inside-avoid">
-          {sorted.map((a) => (
-            <AuctionCard key={a.auctionId} auction={a} />
-          ))}
-        </div>
-      )}
+      {/* Grid streams in once the chain scan completes. */}
+      <Suspense fallback={<GridFallback />}>
+        <AuctionGrid />
+      </Suspense>
 
       <Footer />
+    </div>
+  )
+}
+
+async function AuctionGrid() {
+  const [auctions, house] = await Promise.all([
+    getAllAuctions(),
+    getArtistHouse(),
+  ])
+
+  if (!house) return <NoHouseState />
+
+  // Warm the token-metadata cache for all auctions in parallel so each
+  // <AuctionCard> render hits the in-memory cache rather than firing a
+  // fresh RPC + IPFS fetch.
+  await Promise.all(
+    auctions.map((a) => getTokenMetadata(a.tokenContract, a.tokenId)),
+  )
+
+  const sorted = [...auctions].sort(compareAuctions)
+  const activeCount = auctions.filter((a) => {
+    const b = bucketFor(a)
+    return b === "active" || b === "ending"
+  }).length
+
+  if (sorted.length === 0) return <EmptyState />
+
+  return (
+    <div className="space-y-4">
+      <p className="font-mono text-xs text-fg-muted">
+        {auctions.length} {auctions.length === 1 ? "auction" : "auctions"}
+        {activeCount > 0 ? ` · ${activeCount} live` : ""}
+      </p>
+      <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-6 [&>*]:mb-6 [&>*]:break-inside-avoid">
+        {sorted.map((a) => (
+          <AuctionCard key={a.auctionId} auction={a} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function HeroFallback() {
+  return (
+    <div className="flex flex-col sm:flex-row items-start gap-6">
+      <div className="h-20 w-20 shrink-0 rounded-full skeleton" />
+      <div className="space-y-3 pt-2">
+        <div className="h-8 w-48 skeleton" />
+        <div className="h-3 w-28 skeleton" />
+        <div className="h-3 w-64 skeleton" />
+      </div>
+    </div>
+  )
+}
+
+function GridFallback() {
+  return (
+    <div className="border border-white/15 p-12 text-center">
+      <p className="font-mono text-sm text-fg-muted animate-pulse">
+        Loading auctions…
+      </p>
     </div>
   )
 }

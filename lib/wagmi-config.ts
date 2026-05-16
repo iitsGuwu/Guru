@@ -30,7 +30,7 @@ import {
   walletConnectWallet,
   safeWallet,
 } from "@rainbow-me/rainbowkit/wallets"
-import { fallback, http, createConfig } from "wagmi"
+import { fallback, http, createConfig, createStorage, noopStorage } from "wagmi"
 import { mainnet } from "wagmi/chains"
 import { DEFAULT_WALLETCONNECT_PROJECT_ID, getConfig } from "./config"
 
@@ -98,6 +98,10 @@ export function getWagmiConfig() {
     connectors,
     transports,
     ssr: true,
+    // Disable auto-reconnect on page load — users must click Connect Wallet
+    // explicitly. noopStorage prevents wagmi from persisting or restoring
+    // the last-connected wallet across navigations.
+    storage: createStorage({ storage: noopStorage }),
   }) as unknown as ReturnType<typeof getDefaultConfig>
   return _wagmiConfig
 }

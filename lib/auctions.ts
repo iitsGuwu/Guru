@@ -23,12 +23,10 @@ import {
 import { getConfig, ZERO_ADDRESS } from "./config"
 
 // Hard deadline for any on-chain scan inside this module. Netlify's free
-// tier kills functions at ~10s and the Pro tier at ~26s — overshooting that
-// truncates the RSC stream mid-flight and the browser sees "Connection
-// closed" loops. We throw before that happens so the cache stays empty
-// (not poisoned with partial data) and `app/art/error.tsx` renders a clean
-// retry state instead.
-const SCAN_DEADLINE_MS = 18_000
+// tier kills functions at ~10s and the Pro tier at ~26s — we fire well
+// before either so the RSC stream can flush the error boundary before the
+// runtime cuts it. 7s gives ~3s headroom on the free tier.
+const SCAN_DEADLINE_MS = 7_000
 
 function withDeadline<T>(label: string, work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null

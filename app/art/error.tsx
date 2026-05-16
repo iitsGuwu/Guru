@@ -16,10 +16,11 @@ export default function ArtError({
   reset: () => void
 }) {
   useEffect(() => {
-    // Surface the failure for debugging — no PII, just the error class.
-    if (process.env.NODE_ENV !== "production") {
-      console.warn("[/art error boundary]", error)
-    }
+    // Always log (prod included). Next.js strips the message from the
+    // production digest, so this browser-console line + the server-side
+    // "[/art] auction scan failed:" log in the Netlify function are the only
+    // ways to see why this fired. The digest correlates the two.
+    console.error("[/art error boundary] digest:", error.digest ?? "(none)", error)
   }, [error])
 
   return (
@@ -38,8 +39,9 @@ export default function ArtError({
           Auction load failed
         </p>
         <p className="font-mono text-xs text-fg-muted leading-relaxed">
-          The on-chain scan didn&rsquo;t complete in time. This usually clears up
-          within a minute once the cache warms up — try again.
+          The on-chain scan didn&rsquo;t complete. If a retry doesn&rsquo;t clear
+          it, check the Netlify function log for the line starting
+          &ldquo;[/art] auction scan failed&rdquo; — that has the real cause.
         </p>
         <button
           type="button"
@@ -48,6 +50,11 @@ export default function ArtError({
         >
           Retry
         </button>
+        {error.digest ? (
+          <p className="font-mono text-[10px] text-fg-muted/60 pt-2">
+            ref: {error.digest}
+          </p>
+        ) : null}
       </div>
     </div>
   )

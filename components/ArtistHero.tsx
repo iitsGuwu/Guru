@@ -6,7 +6,7 @@
  * `lib/artist.ts`, so artists who only set their wallet address still get a
  * filled-in profile.
  */
-import { getConfig } from "@/lib/config"
+import { checkConfig, getConfig } from "@/lib/config"
 import {
   getArtistDisplayName,
   getArtistAvatarUrl,
@@ -20,6 +20,10 @@ import { getEnsName } from "@/lib/ens"
 import { AddressZorb } from "@/components/AddressZorb"
 
 export async function ArtistHero() {
+  // Bail silently on a misconfigured deploy — the AuctionGrid sibling renders
+  // the actionable ConfigErrorState, and ArtistHero throwing here would
+  // instead trip the generic route error boundary before that can show.
+  if (!checkConfig().ok) return null
   const cfg = getConfig()
   const [displayName, avatarUrl, bio, links, ens, house] = await Promise.all([
     getArtistDisplayName(),

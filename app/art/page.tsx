@@ -13,6 +13,7 @@ import {
 } from "@/lib/auctions"
 import { getTokenMetadata } from "@/lib/metadata"
 import { getArtistDisplayName } from "@/lib/artist"
+import { checkConfig } from "@/lib/config"
 import type { Metadata } from "next"
 
 // Force-dynamic so we don't try to scan the chain at build time (cold log
@@ -22,6 +23,11 @@ import type { Metadata } from "next"
 export const dynamic = "force-dynamic"
 
 export async function generateMetadata(): Promise<Metadata> {
+  // Must not throw on a misconfigured deploy — otherwise the whole route
+  // 500s before the page's graceful ConfigErrorState can render.
+  if (!checkConfig().ok) {
+    return { title: "Art" }
+  }
   const name = await getArtistDisplayName()
   return {
     title: `Art`,
@@ -77,10 +83,29 @@ export default async function ArtPage() {
 }
 
 async function AuctionGrid() {
-  const [auctions, house] = await Promise.all([
-    getAllAuctions(),
-    getArtistHouse(),
-  ])
+  // Preflight: a missing/invalid NEXT_PUBLIC_ARTIST_ADDRESS is a permanent
+  // deploy misconfiguration. Render a specific, actionable message instead
+  // of letting getConfig() throw into the generic retry boundary.
+  const cfg = checkConfig()
+  if (!cfg.ok) {
+    console.error(`[/art] configuration error: ${cfg.reason}`)
+    return <ConfigErrorState reason={cfg.reason} />
+  }
+
+  let auctions: AuctionSummary[]
+  let house: Awaited<ReturnType<typeof getArtistHouse>>
+  try {
+    ;[auctions, house] = await Promise.all([
+      getAllAuctions(),
+      getArtistHouse(),
+    ])
+  } catch (err) {
+    // Surface the real cause in Netlify's function logs — Next.js strips
+    // Server Component error messages from the production error boundary,
+    // so without this the failure is invisible.
+    console.error("[/art] auction scan failed:", err)
+    throw err
+  }
 
   if (!house) return <NoHouseState />
 
@@ -152,6 +177,19 @@ function EmptyState() {
     <div className="border border-white/15 p-12 text-center">
       <p className="font-mono text-sm text-fg-muted">
         No auctions yet — they&rsquo;ll appear here once they&rsquo;re created on-chain.
+      </p>
+    </div>
+  )
+}
+
+function ConfigErrorState({ reason }: { reason: string }) {
+  return (
+    <div className="border border-status-sold/40 bg-status-sold/5 p-12 text-center space-y-2">
+      <p className="font-gothic text-sm tracking-[0.2em] uppercase">
+        Site not configured
+      </p>
+      <p className="font-mono text-sm text-fg-muted max-w-md mx-auto">
+        {reason}
       </p>
     </div>
   )

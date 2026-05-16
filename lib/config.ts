@@ -103,6 +103,41 @@ export type AppConfig = {
   factoryDeployBlock: bigint
 }
 
+/**
+ * Non-throwing config preflight. The page calls this *before* touching any
+ * RPC code so a deploy-time misconfiguration (missing/invalid
+ * NEXT_PUBLIC_ARTIST_ADDRESS) renders a clear, actionable message instead of
+ * the generic "Auction load failed / Retry" error boundary — retrying never
+ * fixes a missing env var, so it must be visually distinct from a transient
+ * scan failure.
+ */
+export function checkConfig():
+  | { ok: true }
+  | { ok: false; reason: string } {
+  const raw = process.env.NEXT_PUBLIC_ARTIST_ADDRESS?.trim()
+  if (!raw) {
+    return {
+      ok: false,
+      reason:
+        "NEXT_PUBLIC_ARTIST_ADDRESS is not set. Add it in your host's environment variables and redeploy.",
+    }
+  }
+  if (raw === ZERO) {
+    return {
+      ok: false,
+      reason:
+        "NEXT_PUBLIC_ARTIST_ADDRESS is still the placeholder zero address. Set it to your real wallet address and redeploy.",
+    }
+  }
+  if (!isAddress(raw)) {
+    return {
+      ok: false,
+      reason: `NEXT_PUBLIC_ARTIST_ADDRESS is not a valid Ethereum address: ${raw}`,
+    }
+  }
+  return { ok: true }
+}
+
 export function getConfig(): AppConfig {
   if (_config) return _config
   _config = {

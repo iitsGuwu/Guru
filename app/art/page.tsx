@@ -1,17 +1,14 @@
 import { Suspense } from "react"
 import Link from "next/link"
 import { ArtistHero } from "@/components/ArtistHero"
-import { AuctionCard, bucketFor } from "@/components/AuctionCard"
+import { AuctionCard } from "@/components/AuctionCard"
+import { CatalogCard } from "@/components/CatalogCard"
 import { AuctionRealtimeWatcher } from "@/components/AuctionRealtimeWatcher"
 import { Footer } from "@/components/Footer"
 import { ConnectButton } from "@/components/ConnectButton"
 import { PendingRefundsBanner } from "@/components/PendingRefundsBanner"
-import {
-  getAllAuctions,
-  getArtistHouse,
-  type AuctionSummary,
-} from "@/lib/auctions"
-import { getTokenMetadata } from "@/lib/metadata"
+import { getArtistHouse } from "@/lib/auctions"
+import { getCatalog } from "@/lib/catalog"
 import { getArtistDisplayName } from "@/lib/artist"
 import { checkConfig } from "@/lib/config"
 import type { Metadata } from "next"
@@ -31,27 +28,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const name = await getArtistDisplayName()
   return {
     title: `Art`,
-    description: `On-chain creations by ${name} — live and past auctions pulled directly from the blockchain.`,
+    description: `The full on-chain catalog of ${name} — every piece across their collections, with live auctions where pieces are listed.`,
   }
-}
-
-const BUCKET_RANK: Record<ReturnType<typeof bucketFor>, number> = {
-  active: 0,
-  ending: 1,
-  listed: 2,
-  settled: 3,
-  cancelled: 4,
-}
-
-function compareAuctions(a: AuctionSummary, b: AuctionSummary): number {
-  const ra = BUCKET_RANK[bucketFor(a)]
-  const rb = BUCKET_RANK[bucketFor(b)]
-  if (ra !== rb) return ra - rb
-  const ba = bucketFor(a)
-  if (ba === "active" || ba === "ending") {
-    return Number(a.endTime) - Number(b.endTime)
-  }
-  return Number(b.auctionId) - Number(a.auctionId)
 }
 
 export default async function ArtPage() {
@@ -72,9 +50,9 @@ export default async function ArtPage() {
         <ArtistHero />
       </Suspense>
 
-      {/* Grid streams in once the chain scan completes. */}
+      {/* Catalog streams in once the on-chain reads complete. */}
       <Suspense fallback={<GridFallback />}>
-        <AuctionGrid />
+        <CatalogGrid />
       </Suspense>
 
       <Footer />
@@ -82,7 +60,7 @@ export default async function ArtPage() {
   )
 }
 
-async function AuctionGrid() {
+async function CatalogGrid() {
   // Preflight: a missing/invalid NEXT_PUBLIC_ARTIST_ADDRESS is a permanent
   // deploy misconfiguration. Render a specific, actionable message instead
   // of letting getConfig() throw into the generic retry boundary.
@@ -92,47 +70,26 @@ async function AuctionGrid() {
     return <ConfigErrorState reason={cfg.reason} />
   }
 
-  let auctions: AuctionSummary[]
+  let items: Awaited<ReturnType<typeof getCatalog>>
   let house: Awaited<ReturnType<typeof getArtistHouse>>
   try {
-    ;[auctions, house] = await Promise.all([
-      getAllAuctions(),
-      getArtistHouse(),
-    ])
+    ;[items, house] = await Promise.all([getCatalog(), getArtistHouse()])
   } catch (err) {
     // Surface the real cause in Netlify's function logs — Next.js strips
-    // Server Component error messages from the production error boundary,
-    // so without this the failure is invisible.
-    console.error("[/art] auction scan failed:", err)
+    // Server Component error messages from the production error boundary.
+    console.error("[/art] catalog load failed:", err)
     throw err
   }
 
-  if (!house) return <NoHouseState />
+  const liveCount = items.filter(
+    (i) => i.auction && i.auction.status !== "cancelled",
+  ).length
 
-  // Cancelled auctions are noise on a showcase page — the artist pulled
-  // them before any sale, so they have no token/price story to tell. Hide
-  // them from the grid (the detail route still resolves them by direct
-  // link via getAuctionById, which keeps the full list).
-  auctions = auctions.filter((a) => a.status !== "cancelled")
-
-  // Warm the token-metadata cache for all auctions in parallel so each
-  // <AuctionCard> render hits the in-memory cache rather than firing a
-  // fresh RPC + IPFS fetch.
-  await Promise.all(
-    auctions.map((a) => getTokenMetadata(a.tokenContract, a.tokenId)),
-  )
-
-  const sorted = [...auctions].sort(compareAuctions)
-  const activeCount = auctions.filter((a) => {
-    const b = bucketFor(a)
-    return b === "active" || b === "ending"
-  }).length
-
-  if (sorted.length === 0) {
+  if (items.length === 0) {
     return (
       <div className="space-y-4">
-        <PendingRefundsBanner houseAddress={house} />
-        <AuctionRealtimeWatcher houseAddress={house} />
+        {house ? <PendingRefundsBanner houseAddress={house} /> : null}
+        {house ? <AuctionRealtimeWatcher houseAddress={house} /> : null}
         <EmptyState />
       </div>
     )
@@ -140,16 +97,26 @@ async function AuctionGrid() {
 
   return (
     <div className="space-y-4">
-      <PendingRefundsBanner houseAddress={house} />
-      <AuctionRealtimeWatcher houseAddress={house} />
+      {house ? <PendingRefundsBanner houseAddress={house} /> : null}
+      {house ? <AuctionRealtimeWatcher houseAddress={house} /> : null}
       <p className="font-mono text-xs text-fg-muted">
-        {auctions.length} {auctions.length === 1 ? "auction" : "auctions"}
-        {activeCount > 0 ? ` · ${activeCount} live` : ""}
+        {items.length} {items.length === 1 ? "work" : "works"}
+        {liveCount > 0 ? ` · ${liveCount} on auction` : ""}
       </p>
       <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-6 [&>*]:mb-6 [&>*]:break-inside-avoid">
-        {sorted.map((a) => (
-          <AuctionCard key={a.auctionId} auction={a} />
-        ))}
+        {items.map((item) =>
+          item.auction ? (
+            <AuctionCard
+              key={`${item.contract}:${item.tokenId}`}
+              auction={item.auction}
+            />
+          ) : (
+            <CatalogCard
+              key={`${item.contract}:${item.tokenId}`}
+              item={item}
+            />
+          ),
+        )}
       </div>
     </div>
   )
@@ -172,7 +139,7 @@ function GridFallback() {
   return (
     <div className="border border-white/15 p-12 text-center">
       <p className="font-mono text-sm text-fg-muted animate-pulse">
-        Loading auctions…
+        Loading gallery…
       </p>
     </div>
   )
@@ -182,7 +149,7 @@ function EmptyState() {
   return (
     <div className="border border-white/15 p-12 text-center">
       <p className="font-mono text-sm text-fg-muted">
-        No auctions yet — they&rsquo;ll appear here once they&rsquo;re created on-chain.
+        No works found — check the configured collection contracts.
       </p>
     </div>
   )
@@ -196,20 +163,6 @@ function ConfigErrorState({ reason }: { reason: string }) {
       </p>
       <p className="font-mono text-sm text-fg-muted max-w-md mx-auto">
         {reason}
-      </p>
-    </div>
-  )
-}
-
-function NoHouseState() {
-  return (
-    <div className="border border-white/15 p-12 text-center space-y-2">
-      <p className="font-gothic text-sm tracking-[0.2em] uppercase">
-        Auction house not deployed
-      </p>
-      <p className="font-mono text-sm text-fg-muted max-w-md mx-auto">
-        This wallet hasn&rsquo;t deployed a Sovereign auction house yet. Once
-        deployed, every auction created shows up here automatically.
       </p>
     </div>
   )

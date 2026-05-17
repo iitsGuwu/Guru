@@ -64,6 +64,26 @@ function readLinks(): string[] {
     .filter(Boolean)
 }
 
+// The artist's NFT collection contracts, shown as the /art catalog. The
+// auction house only knows tokens that were auctioned, so the full body of
+// work has to be declared explicitly. Defaults to the two known iitsGuru
+// collections; `NEXT_PUBLIC_ART_CONTRACTS` (comma-separated addresses)
+// overrides — append here when launching a new collection.
+const DEFAULT_ART_CONTRACTS: Address[] = [
+  "0xE2cb45E9413262AB62CF19b7080275fC7d4C489A", // Glitched Souls
+  "0x801De76aCd4885C35f352Ba5C19F7285826D31C1", // Monochrome Chronicles
+]
+
+function readArtContracts(): Address[] {
+  const raw = process.env.NEXT_PUBLIC_ART_CONTRACTS?.trim()
+  if (!raw) return DEFAULT_ART_CONTRACTS
+  const parsed = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s): s is Address => isAddress(s))
+  return parsed.length > 0 ? parsed : DEFAULT_ART_CONTRACTS
+}
+
 function readRpcUrls(): string[] | null {
   // Plural takes priority — power users specifying a chain.
   const plural = process.env.NEXT_PUBLIC_RPC_URLS?.trim()
@@ -101,6 +121,8 @@ export type AppConfig = {
   walletConnectProjectId: string
   factoryAddress: Address
   factoryDeployBlock: bigint
+  /** Artist NFT collection contracts shown as the /art catalog. */
+  artContracts: Address[]
 }
 
 /**
@@ -152,6 +174,7 @@ export function getConfig(): AppConfig {
       DEFAULT_WALLETCONNECT_PROJECT_ID,
     factoryAddress: SOVEREIGN_FACTORY_ADDRESS,
     factoryDeployBlock: SOVEREIGN_FACTORY_DEPLOY_BLOCK,
+    artContracts: readArtContracts(),
   }
   return _config
 }

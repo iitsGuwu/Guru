@@ -27,13 +27,21 @@ import { getConfig, ZERO_ADDRESS } from "./config"
 // before either so the RSC stream can flush the error boundary before the
 // runtime cuts it. 7s gives ~3s headroom on the free tier.
 const SCAN_DEADLINE_MS = 7_000
+// Past-auction event enrichment gets a shorter budget than the outer scan
+// so a slow/limited RPC degrades to minimal cards (caught by the caller)
+// well before the outer deadline would fail the whole page.
+const ENRICH_DEADLINE_MS = 4_500
 
-function withDeadline<T>(label: string, work: Promise<T>): Promise<T> {
+function withDeadline<T>(
+  label: string,
+  work: Promise<T>,
+  ms: number = SCAN_DEADLINE_MS,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`[auctions] ${label} exceeded ${SCAN_DEADLINE_MS}ms`)),
-      SCAN_DEADLINE_MS,
+      () => reject(new Error(`[auctions] ${label} exceeded ${ms}ms`)),
+      ms,
     )
   })
   return Promise.race([work, timeout]).finally(() => {
@@ -166,14 +174,123 @@ export async function getAllAuctions(): Promise<AuctionSummary[]> {
 async function fetchAllAuctionsForHouse(
   house: Address,
 ): Promise<AuctionSummary[]> {
+  const client = getClient()
+
+  // Master list comes from the contract's own counter, not an event scan.
+  // `eth_call` has no block-range limits, so this works on any RPC —
+  // including free/public nodes that cap or reject wide `eth_getLogs`
+  // (which made the old log-scan approach hang ~100s and return nothing).
+  const nextId = (await client.readContract({
+    address: house,
+    abi: sovereignAuctionHouseAbi,
+    functionName: "nextAuctionId",
+  })) as bigint
+  if (nextId === 0n) return []
+
+  const ids = Array.from({ length: Number(nextId) }, (_, i) => BigInt(i))
+
+  // Current on-chain state for every auctionId via multicall (1 batched
+  // eth_call per 100). Live/upcoming auctions return a full struct; the
+  // contract deletes storage on settle/cancel, so those come back zeroed
+  // (tokenOwner == 0) — we enrich those from events, best-effort, below.
+  const BATCH = 100
+  const liveAuctions: AuctionSummary[] = []
+  const pastIds: bigint[] = []
+
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const batch = ids.slice(i, i + BATCH)
+    const results = await client
+      .multicall({
+        contracts: batch.map((id) => ({
+          address: house,
+          abi: sovereignAuctionHouseAbi,
+          functionName: "auctions" as const,
+          args: [id] as const,
+        })),
+        allowFailure: true,
+      })
+      .catch(() => [])
+
+    batch.forEach((id, idx) => {
+      const idStr = id.toString()
+      const r = results[idx]
+      if (r && r.status === "success" && r.result) {
+        const [
+          tId,
+          tContract,
+          firstBidTime,
+          amount,
+          rPrice,
+          tOwner,
+          endTime,
+          bidder,
+          dur,
+        ] = r.result as readonly [
+          bigint, Address, bigint, bigint, bigint, Address, bigint, Address, bigint,
+        ]
+        if (tOwner !== ZERO_ADDRESS) {
+          // firstBidTime 0 → not started; otherwise live (incl. ended-but-
+          // not-settled, so visitors can still trigger settlement).
+          const status: AuctionStatus = firstBidTime === 0n ? "upcoming" : "live"
+          liveAuctions.push({
+            auctionId: idStr,
+            tokenContract: tContract,
+            tokenId: tId.toString(),
+            reservePrice: rPrice.toString(),
+            duration: dur.toString(),
+            amount: amount.toString(),
+            bidder,
+            endTime: endTime.toString(),
+            firstBidTime: firstBidTime.toString(),
+            tokenOwner: tOwner,
+            status,
+          })
+          return
+        }
+      }
+      // Zeroed struct or failed read → settled/cancelled (storage deleted).
+      pastIds.push(id)
+    })
+  }
+
+  // Past auctions need event data (token contract/id, final price, winner)
+  // since their storage is gone. This is the only path that still touches
+  // `eth_getLogs`; it's best-effort and time-boxed so a slow/limited RPC
+  // degrades to minimal cards instead of failing the whole page. The
+  // common case (all auctions still live) skips this entirely.
+  let pastAuctions: AuctionSummary[] = []
+  if (pastIds.length > 0) {
+    pastAuctions = await withDeadline(
+      "enrichPastAuctions",
+      enrichPastAuctions(house, pastIds),
+      ENRICH_DEADLINE_MS,
+    ).catch(() =>
+      pastIds.map((id) => buildPastSummary(
+        id.toString(), ZERO_ADDRESS as Address, "0", "0", "0",
+        ZERO_ADDRESS as Address, undefined, false,
+      )),
+    )
+  }
+
+  const auctions = [...liveAuctions, ...pastAuctions]
+  // Newest first — auctionIds are assigned sequentially by the contract.
+  auctions.sort((a, b) => Number(BigInt(b.auctionId) - BigInt(a.auctionId)))
+  return auctions
+}
+
+/**
+ * Best-effort enrichment of settled/cancelled auctions from events. Bounded
+ * by the module scan deadline via the caller; on any failure the caller
+ * falls back to minimal cards so the page still renders the live auctions.
+ */
+async function enrichPastAuctions(
+  house: Address,
+  pastIds: bigint[],
+): Promise<AuctionSummary[]> {
   const { factoryDeployBlock } = getConfig()
   const client = getClient()
-  const latest = await client.getBlockNumber().catch(() => null)
-  if (latest === null) return []
+  const latest = await client.getBlockNumber()
 
-  // Scan three event streams in parallel. AuctionCreated is the master list;
-  // AuctionEnded marks settled; AuctionCanceled marks cancelled. The first
-  // is the bulk of the work — the others are sparse.
   const [created, ended, cancelled] = await Promise.all([
     getLogsChunked({
       address: house,
@@ -195,10 +312,15 @@ async function fetchAllAuctionsForHouse(
     }),
   ])
 
-  if (created.length === 0) return []
-
-  // Index settle / cancel logs by auctionId for O(1) lookup.
-  const settledById = new Map<string, { winner: Address; sellerProceeds: bigint; protocolFee: bigint }>()
+  const createdByAuctionId = new Map<string, (typeof created)[number]>()
+  for (const log of created) {
+    const id = log.args.auctionId
+    if (id !== undefined) createdByAuctionId.set(id.toString(), log)
+  }
+  const settledById = new Map<
+    string,
+    { winner: Address; sellerProceeds: bigint; protocolFee: bigint }
+  >()
   for (const log of ended) {
     const id = log.args.auctionId
     if (id === undefined) continue
@@ -214,132 +336,20 @@ async function fetchAllAuctionsForHouse(
     if (id !== undefined) cancelledIds.add(id.toString())
   }
 
-  const ids = created
-    .map((log) => log.args.auctionId)
-    .filter((id): id is bigint => id !== undefined)
-
-  // Read current on-chain state for every auctionId in batches via
-  // multicall. The house deletes the storage slot for cancelled/settled
-  // auctions, so a zero `tokenOwner` from the read tells us the auction
-  // is no longer live (we cross-reference with settle/cancel events to
-  // pick the right status).
-  const BATCH = 100
-  const auctions: AuctionSummary[] = []
-
-  // Build a map: created event has the full set of static fields we need
-  // for past auctions where the storage slot has been deleted. We also
-  // need block.timestamp for sort ordering — fetch via getBlock per
-  // unique block (small N for typical artist).
-  const createdByAuctionId = new Map<string, (typeof created)[number]>()
-  for (const log of created) {
-    const id = log.args.auctionId
-    if (id === undefined) continue
-    createdByAuctionId.set(id.toString(), log)
-  }
-
-  for (let i = 0; i < ids.length; i += BATCH) {
-    const batch = ids.slice(i, i + BATCH)
-    const results = await client
-      .multicall({
-        contracts: batch.map((id) => ({
-          address: house,
-          abi: sovereignAuctionHouseAbi,
-          functionName: "auctions" as const,
-          args: [id] as const,
-        })),
-        allowFailure: true,
-      })
-      .catch(() => [])
-
-    batch.forEach((id, idx) => {
-      const idStr = id.toString()
-      const r = results[idx]
-      const createdLog = createdByAuctionId.get(idStr)
-      const settledInfo = settledById.get(idStr)
-      const cancelledFlag = cancelledIds.has(idStr)
-
-      // Default to event-only data (used for past auctions whose storage was deleted).
-      const createdArgs = createdLog?.args
-      const tokenContract = (createdArgs?.tokenContract ?? ZERO_ADDRESS) as Address
-      const tokenId = createdArgs?.tokenId?.toString() ?? "0"
-      const reservePrice = (createdArgs?.reservePrice ?? 0n).toString()
-      const duration = (createdArgs?.duration ?? 0n).toString()
-      const tokenOwner = (createdArgs?.tokenOwner ?? ZERO_ADDRESS) as Address
-
-      let summary: AuctionSummary
-      if (r && r.status === "success" && r.result) {
-        // Live auction (storage slot still set).
-        const tuple = r.result as readonly [
-          bigint, Address, bigint, bigint, bigint, Address, bigint, Address, bigint,
-        ]
-        const [
-          tId,
-          tContract,
-          firstBidTime,
-          amount,
-          rPrice,
-          tOwner,
-          endTime,
-          bidder,
-          dur,
-        ] = tuple
-
-        if (tOwner !== ZERO_ADDRESS) {
-          const nowSec = Math.floor(Date.now() / 1000)
-          const endNum = Number(endTime)
-          const status: AuctionStatus =
-            firstBidTime === 0n
-              ? "upcoming"
-              : endNum > 0 && endNum <= nowSec
-                ? "live" // ended but not yet settled — surface as live so visitors can settle
-                : "live"
-          summary = {
-            auctionId: idStr,
-            tokenContract: tContract,
-            tokenId: tId.toString(),
-            reservePrice: rPrice.toString(),
-            duration: dur.toString(),
-            amount: amount.toString(),
-            bidder,
-            endTime: endTime.toString(),
-            firstBidTime: firstBidTime.toString(),
-            tokenOwner: tOwner,
-            status,
-          }
-        } else {
-          // Storage deleted — past auction. Use event data.
-          summary = buildPastSummary(
-            idStr,
-            tokenContract,
-            tokenId,
-            reservePrice,
-            duration,
-            tokenOwner,
-            settledInfo,
-            cancelledFlag,
-          )
-        }
-      } else {
-        // Read failed — assume past, use event data.
-        summary = buildPastSummary(
-          idStr,
-          tokenContract,
-          tokenId,
-          reservePrice,
-          duration,
-          tokenOwner,
-          settledInfo,
-          cancelledFlag,
-        )
-      }
-
-      auctions.push(summary)
-    })
-  }
-
-  // Sort newest auctions first — auctionIds are assigned sequentially by the contract.
-  auctions.sort((a, b) => Number(BigInt(b.auctionId) - BigInt(a.auctionId)))
-  return auctions
+  return pastIds.map((id) => {
+    const idStr = id.toString()
+    const c = createdByAuctionId.get(idStr)?.args
+    return buildPastSummary(
+      idStr,
+      (c?.tokenContract ?? ZERO_ADDRESS) as Address,
+      c?.tokenId?.toString() ?? "0",
+      (c?.reservePrice ?? 0n).toString(),
+      (c?.duration ?? 0n).toString(),
+      (c?.tokenOwner ?? ZERO_ADDRESS) as Address,
+      settledById.get(idStr),
+      cancelledIds.has(idStr),
+    )
+  })
 }
 
 function buildPastSummary(

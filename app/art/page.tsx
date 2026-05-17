@@ -109,6 +109,12 @@ async function AuctionGrid() {
 
   if (!house) return <NoHouseState />
 
+  // Cancelled auctions are noise on a showcase page — the artist pulled
+  // them before any sale, so they have no token/price story to tell. Hide
+  // them from the grid (the detail route still resolves them by direct
+  // link via getAuctionById, which keeps the full list).
+  auctions = auctions.filter((a) => a.status !== "cancelled")
+
   // Warm the token-metadata cache for all auctions in parallel so each
   // <AuctionCard> render hits the in-memory cache rather than firing a
   // fresh RPC + IPFS fetch.

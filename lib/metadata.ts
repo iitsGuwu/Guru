@@ -18,7 +18,7 @@
  *
  * We don't resolve `image` URLs from the metadata at all when they're already
  * `data:` URLs — `<img>` renders them directly. IPFS images get rewritten
- * through the first gateway so Next.js can range-request them.
+ * through a reliable single gateway (`IMAGE_GATEWAY`).
  */
 import "server-only"
 import { unstable_cache } from "next/cache"
@@ -26,12 +26,20 @@ import { type Address } from "viem"
 import { getClient } from "./rpc"
 import { erc721Abi } from "./abi"
 
+// Gateways raced for metadata JSON. nftstorage.link / cloudflare-ipfs.com /
+// dweb.link were all dead (timeouts / DNS failure / HTML error pages) as of
+// 2026-05 — keeping them only added latency to the Promise.any race. These
+// three are verified working and ordered fastest-first.
 const IPFS_GATEWAYS = [
-  "https://nftstorage.link/ipfs/",
   "https://ipfs.io/ipfs/",
-  "https://cloudflare-ipfs.com/ipfs/",
-  "https://dweb.link/ipfs/",
+  "https://ipfs.filebase.io/ipfs/",
+  "https://gateway.pinata.cloud/ipfs/",
 ]
+
+// Single gateway used to rewrite `ipfs://` image URLs into something an
+// <img> can load. Must be reliable on its own (no race/fallback once the
+// HTML is sent to the browser). ipfs.io is the fastest verified option.
+const IMAGE_GATEWAY = "https://ipfs.io/ipfs/"
 
 export type TokenMetadata = {
   name: string
@@ -56,7 +64,9 @@ export const getTokenMetadata = unstable_cache(
   ): Promise<TokenMetadata | null> => {
     return fetchFromTokenUri(tokenContract, tokenId)
   },
-  ["token-metadata-v2"],
+  // v3: busts entries cached with the old dead-gateway image URLs
+  // (nftstorage.link) — bump on any change to image-URL resolution.
+  ["token-metadata-v3"],
   { revalidate: 60 * 60, tags: ["token-metadata"] },
 )
 
@@ -195,12 +205,12 @@ function parseDataUrlJson(url: string): Record<string, unknown> | null {
 /**
  * Rewrite the metadata's `image` field to something a browser `<img>` /
  * `next/image` can render directly. `data:` URLs and HTTPS URLs pass through
- * unchanged; `ipfs://` gets resolved through the first gateway.
+ * unchanged; `ipfs://` gets resolved through the reliable image gateway.
  */
 function resolveImageUri(uri: string): string {
   if (uri.startsWith("ipfs://")) {
     const path = uri.slice("ipfs://".length).replace(/^ipfs\//, "")
-    return IPFS_GATEWAYS[0] + path
+    return IMAGE_GATEWAY + path
   }
   return uri
 }

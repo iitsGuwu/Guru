@@ -20,7 +20,7 @@ export const communityProjects: CommunityProject[] = [
     url: "https://harmie.xyz",
     tagline: "Pageant Platform",
     description:
-      "A pageant for the 1-of-1 collection of Harmies, launched by Neuko and the Harmony project. Vote and celebrate the most charming Harmie.",
+      "A pageant for the 1-of-1 collection of Harmies, launched for Neuko and the Harmony project. Vote and celebrate the most charming Harmie.",
     stats: ["1/1 Collection", "Community Voting", "Harmony Project"],
   },
 ]
